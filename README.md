@@ -1,40 +1,78 @@
-# DNS-driven failover for Application Load Balancers on Google Cloud
+# Application Load Balancers failover on Google Cloud (v2)
 
-This repository contains infrastructure-as-code for my deep dive on Google's new(ish), Envoy-based, Application Load Balancers &ndash; global and regional.
+This repo contains infrastructure-as-code for the second iteration of my deep dive on Google [external Application Load Balancers](https://cloud.google.com/load-balancing/docs/https).
 
-I also published an [article explaining the architecture](https://medium.com/@olliefr/global-load-balancer-failover-62e98a0f1253) for this deployment.
+```
+# TODO diagram
+```
 
-In my opinion, you'd enjoy studying the article and the code in this repo if you are interested in learning more about one of the following topics on Google Cloud:
+The [original article](https://medium.com/@olliefr/global-load-balancer-failover-62e98a0f1253) is still available as well.
 
-* Application Load Balancers (HTTP and HTTPS) on Google Cloud, and their limitations.
-* Multi-Cloud architecture (Google Cloud + AWS).
-* High Availability (HA) systems.
-* Serverless architecture.
-* TLS certificates (vendor and self managed) and TLS configuration for maximum security.
-* Best practices in modern Terraform infrastructure-as-code.
+## What's new?
 
-Please bear in mind that a work of this scale is never *truly* finished. Questions, comments, and suggestions are welcome!
+On 14 March 2024, Google announced the general availability of [Certificate Manager](https://cloud.google.com/certificate-manager/docs/overview) certificates for Regional external Application Load Balancers -- [Cloud Load Balancing release notes](https://cloud.google.com/load-balancing/docs/release-notes#March_12_2024). Previously, the regional load balancers of that type could only use self-managed Compute Engine SSL certificates.
+
+Armed with this knowledge I replaced semi-manual provisioning of a Let's Encrypt-issed SSL certificate with the Google-managed option. This not only reduced the complexity of the design, but also decreased the feature gap between the global and the regional variations of the external application load balancer.
+
+
+
+## Pre-requisites
+
+This is a multi-cloud deployment for Google Cloud and AWS. Here's what you need to get started:
+
+* A Google Cloud project with billing enabled.
+* The right permissions granted to you on the target Google Cloud project.
+* A set of Google Cloud APIs enabled on the target Google Cloud project.
+* An AWS account with Route 53 DNS zone configured.
+* The right permissions to manage DNS records in the Route 53 target zone.
+
+The following sections provide further information on the pre-requisites and the deployment process.
+
+## Credentials for Google Cloud
+
+To run Terraform I used [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc) (ADC). 
+
+Other common ways of authenticating Terraform to Google Cloud as described in the provider docs would also work.
+
+## Permissions in Google Cloud
+
+I deployed this design into a sandbox project where I have the basic `Owner` IAM role.
+
+It should be possible to define a set of IAM predefined roles, instead.
+
+## Enabled services in Google Cloud
+
+This module does not enable any Google Cloud APIs on the target Google Cloud project. Service enablement is left as an exercise to the reader.
+
+## Credentials for AWS
+
+My choice of providing AWS credentials was via the environment variables:
+
+* `AWS_ACCESS_KEY_ID`
+* `AWS_SECRET_ACCESS_KEY`
+
+Other common ways of authenticating Terraform to AWS as described in the provider docs would also work.
 
 ## Deployment
 
 Pre-deployment configuration:
 
-* Set up your credentials for Google Cloud SDK (`gcloud`)
-* Set up your credentials for AWS. There is a section on this later in this document.
-* Decide what Terraform backend you'd like to use and adjust the configuration in `versions.tf`
+* Set up your credentials for Google Cloud SDK (`gcloud`).
+* Set up your credentials for AWS.
+* Configure the deployment by editing `terraform.tfvars`.
 
-Deployment is a three-step process:
+Deployment is a one-step process:
 
 1. Apply Terraform configuration! This should deploy enough infra to enable the next step.
-2. Provision your Let's Encrypt certificates by following the relevant section in this document.
-3. Apply Terraform configuration *again*! This time it will pick up the certificate and private key files and finish setting up the infrastructure for this project.
 
-At this point you should have the service responding to requests via the global external ALB. You can verify that by checking the CA on the TLS certificate returned by the server.
+At this point you should have the service responding to requests via the global external ALB. You can verify that by opening the URL reported by `terraform output url -raw`
 
-* Global external ALB is configured with a managed TLS certificate issued by Google CA.
-* Regional external ALB serves a user-managed TLS certificate issued by Let's Encrypt.
 
-To simulate global external ALB failure, rerun Terraform configuration with the `simulate_failure` flag set to `true`:
+## Trigger failover
+
+To trigger the failover, you can simulate global load balancer failure using the load balancer's feature called "fault injection". 
+
+To do this, run Terraform `apply` with the input variable `simulate_failure` set to `true`:
 
 ```bash
 terraform apply -var "simulate_failure=true"
@@ -48,82 +86,22 @@ To reverse the effect, run the Terraform `apply` command again, with `simulate_f
 terraform apply -var "simulate_failure=false"
 ```
 
-The following sections provide more details on different aspects of this deployment. Also don't forget to check out the [article] for which this infrastructure-as-code was written.
-
-[article]: https://medium.com/@olliefr/global-load-balancer-failover-62e98a0f1253
+The following sections provide more details on different aspects of this deployment.
 
 ## DNS records
 
 The DNS zone is hosted with Route 53.
 
-This project makes the following DNS configuration:
+The following DNS configuration is done by this deployment:
 
-* Creates records for DNS authorisation for use with Google-managed SSL certificates.
-* Creates a primary record for the global HTTPS load balancer's IP.
-* Creates a secondary record for the regional HTTPS load balancer's IP.
-* Creates a DNS health-check to enable failover from the primary to the secondary record.
+* Create records for DNS-based authorisation for provisioning Google-managed SSL certificates.
+* Create a primary record for the global application load balancer's IP.
+* Create a secondary record for the regional application load balancer's IP.
+* Create a DNS health-check to enable automatic failover and recovery between the primary and secondary records.
 
-## AWS credentials
+As of the time of writing, this could not be done in Google Cloud DNS as it does not support health-checks for external load balancers.
 
-AWS is my weakest spot at the moment. So, the following is a record of how I muddled through to set up access to Route 53 API for my Terraform.
-
-I installed [AWS CLI], the next step I suppose would be to log in somehow to generate some kind of access token, like with `gcloud auth login`. But AWS appear to have a wide range of [authentication and access credentials], which is all new to me. Guided by inexperience and intuition, I chose what I think is an acceptable, though not ideal, solution:
-
-I created an IAM group `Administrators-DNS` and attached a managed IAM policy `AmazonRoute53FullAccess` to the group. I then created an IAM user `terraform-manage-dns` and added it to the group. Console access is disabled for the user. Finally, I created the access keys credentials for the user.
-
-To use the access key credentials with this module, set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables. Then the AWS provider will pick up the credentials from the environment.
-
-I will review this setup once I learn more about IAM roles in AWS.
-
-[AWS CLI]: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
-[authentication and access credentials]: https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html
-[short-term credentials]: https://docs.aws.amazon.com/cli/latest/userguide/cli-authentication-short-term.html
-
-## Let's Encrypt
-
-To create a user-managed Compute Engine SSL certificate resource, we need the actual certificate and the private key for it.
-
-I went with Let's Encrypt for this proof-of-concept deployment. I used [gcsfuse] to mount a Cloud Storage bucket to my local file system, and then I run [Step CLI] to provision the certificate.
-
-[Step CLI]: https://smallstep.com/docs/step-cli/basic-crypto-operations/#get-a-tls-certificate-from-lets-encrypt
-[gcsfuse]: https://cloud.google.com/storage/docs/gcs-fuse
-
-```bash
-# Domain name for Hello Service. This value goes into the TLS certificate we provision from Let's Encrypt.
-FQDN="hello-service.dev.devilmicelabs.com"
-
-# Host part of Hello Service FQDN
-HOST="hello-service"
-
-# The value of 'acme_bucket' output from the Terraform root module.
-BUCKET=$(terraform output -no-color -raw acme_bucket)
-
-# Let's Encrypt Staging server - use this for experiments. Unlike Production, it's not throttled.
-ACME_TEST="https://acme-staging-v02.api.letsencrypt.org/directory"
-
-# Let's Encrypt Production server - only use this when ready. Don't overload it. It's rate throttled.
-ACME_PROD="https://acme-v02.api.letsencrypt.org/directory"
-
-# Create an empty directory to serve as a mount point for the Cloud Storage $BUCKET.
-mkdir -p ${HOME}/mnt/gcs/.well-known/acme-challenge
-
-# Mount the Cloud Storage $BUCKET under the local file system path.
-gcsfuse $BUCKET ${HOME}/mnt/gcs/.well-known/acme-challenge/
-
-# Request the TLS certificate from Let's Encrypt. If OK, .crt file is the certificate, and .key file is the private key.
-# This command will use the Staging server, adjust for Production accordingly.
-step ca certificate $FQDN ${HOST}.crt ${HOST}.key --acme $ACME_TEST --webroot ${HOME}/mnt/gcs
-
-# (Optional) Inspect the certificate.
-openssl x509 -in ${HOST}.crt -text -noout
-
-# (Optional) Unmount the Cloud Storage bucket from the local filesystem.
-umount ${HOME}/mnt/gcs/.well-known/acme-challenge/
-```
-
-With the certificate and the private key files in hand, I am ready to create a user-managed Compute Engine SSL certificate resource and to deploy the regional ALB.
-
-## Mapping between Google Cloud and Terraform resources
+## (Reference) Mapping between Google Cloud and Terraform resources
 
 This section is a ready reckoner for a set of Terraform Google provider resources that have to do with Network Endpoint Groups (NEG) resources on Google Cloud.
 
@@ -154,4 +132,10 @@ This section is a ready reckoner for a set of Terraform Google provider resource
 
 ## Limitations
 
-* Regional external ALBs have a severe limit on QPS for Cloud Run backends: [docs](https://cloud.google.com/load-balancing/docs/negs/serverless-neg-concepts#limitations-reg)
+As of the time of writing:
+
+* Regional application load balancers have a severe [limit on QPS for Cloud Run backends](https://cloud.google.com/load-balancing/docs/negs/serverless-neg-concepts#limitations-reg). The current design can be easily adapted to route to other kinds of supported back-end though.
+
+* Regional application load balancers do not support backend buckets. While not a feature of the current design, this limitation is quite annoying.
+
+* Google Cloud DNS does not support health checks for external application load balancers. If that changes, Route 53 can be replaced with Google Cloud DNS in the next iteration of design.

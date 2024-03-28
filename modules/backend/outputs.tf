@@ -3,6 +3,6 @@ output "neg_self_link" {
 }
 
 output "service_uri" {
-  description = "The Cloud Run URI of Hello Service."
+  description = "The URL for a Cloud Run service where the Dummy Service is deployed."
   value       = google_cloud_run_v2_service.default.uri
 }

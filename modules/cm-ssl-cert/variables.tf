@@ -6,15 +6,15 @@ variable "google_project" {
 variable "google_region" {
   type     = string
   nullable = false
+  default  = "global"
 }
 
-variable "service_name" {
+variable "domain" {
   type     = string
   nullable = false
 }
 
-variable "container_image" {
-  default  = "gcr.io/cloudrun/hello"
+variable "service_name" {
   type     = string
   nullable = false
 }

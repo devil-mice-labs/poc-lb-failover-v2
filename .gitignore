@@ -1,2 +1,15 @@
-**/.terraform/
-**/terraform.tfvars
+# Terraform initialisation directory 
+.terraform/
+
+# Terraform local state
+*.tfstate
+*.tfstate.d
+
+# Terraform local state backup
+terraform.tfstate.backup
+
+# I use .plan extension with 'terraform plan -out'
+*.plan
+
+# I use .dot extension with 'terraform graph'
+*.dot

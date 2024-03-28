@@ -1,24 +1,7 @@
-data "google_project" "default" {
-  project_id = var.google_project
-}
-
-# TODO validate that services are enabled
-
-locals {
-  # Resolve the ambiguity of the potential presence of
-  # the trailing dot by removing it, if it is present.
-  domain          = trimsuffix(var.domain, ".")
-  domain_parts    = split(".", local.domain)
-  service_name    = local.domain_parts[0]
-  zone_name_parts = slice(local.domain_parts, 1, length(local.domain_parts))
-  zone_name       = join(".", local.zone_name_parts)
-  root_cert_id    = var.root_cert_id
-}
-
 resource "google_compute_backend_service" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
 
-  name = local.service_name
+  name = "${var.service_name}-g"
   backend {
     group = var.neg_self_link
   }
@@ -32,13 +15,13 @@ resource "google_compute_backend_service" "default" {
 }
 
 resource "google_compute_url_map" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
 
-  name = "${local.service_name}-lb-https"
+  name = "${var.service_name}-l7-xlb-urlmap-g-0"
 
   # Accept only traffic that is addressed to the right domain name
   host_rule {
-    hosts        = [local.domain]
+    hosts        = [join(".", [var.service_name, var.domain])]
     path_matcher = "default"
   }
 
@@ -69,93 +52,83 @@ resource "google_compute_url_map" "default" {
 }
 
 resource "google_compute_ssl_policy" "modern" {
-  project = data.google_project.default.project_id
+  project = var.google_project
 
-  name            = "production-ssl-policy"
-  description     = "Our SSL policy for all production services."
+  name            = "modern-ssl-policy-g"
+  description     = "The SSL policy for Load Balancer Failover Demo."
   profile         = "MODERN"
   min_tls_version = "TLS_1_2"
 }
 
 resource "google_certificate_manager_certificate_map" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
 
-  name        = "${local.service_name}-certmap-0"
-  description = "${local.domain} certificate map"
-
-  labels = {
-    "terraform" : true
-  }
+  name        = "${var.service_name}-certmap-g-0"
+  description = "Maps Google-managed certificates to the Dummy Service domain name for the Load Balancer Failover Demo"
 }
 
 resource "google_certificate_manager_certificate_map_entry" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
 
-  name     = "${local.service_name}-entry-0"
+  name     = "${var.service_name}-certmapentry-g-0"
   map      = google_certificate_manager_certificate_map.default.name
-  hostname = local.domain
+  hostname = join(".", [var.service_name, var.domain])
 
-  # FIXME no data resource exists for Certificate Manager certificates
+  # FIXME no data resource exists for managed certificates from Certificate Manager
   certificates = [
-    local.root_cert_id,
+    var.certificate_manager_certificate,
   ]
-
-  labels = {
-    "terraform" : true
-  }
 }
 
 resource "google_compute_target_https_proxy" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
 
-  name            = "${local.service_name}-https-proxy"
+  name            = "${var.service_name}-https-tgtproxy-g"
   url_map         = google_compute_url_map.default.id
   certificate_map = "//certificatemanager.googleapis.com/${google_certificate_manager_certificate_map.default.id}"
   ssl_policy      = google_compute_ssl_policy.modern.self_link
+}
 
-  # The Certificate Manager documentation says that the certificate map 
-  # must only be attached to the target proxy after the certificate map
-  # entries had been populated but there is no direct reference from
-  # the certificate map entry to the target proxy so we create a dependency.
-  # https://cloud.google.com/certificate-manager/docs/maps#attach-proxy
-  depends_on = [
-    google_certificate_manager_certificate_map_entry.default,
-  ]
+resource "google_compute_global_address" "default" {
+  project = var.google_project
+
+  name         = "${var.service_name}-l7-xlb-g"
+  address_type = "EXTERNAL"
 }
 
 resource "google_compute_global_forwarding_rule" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
 
-  name                  = "${local.service_name}-lb-https"
+  name                  = "${var.service_name}-l7-xlb-fwrule-g-0"
   target                = google_compute_target_https_proxy.default.self_link
-  ip_address            = var.ipv4_global.id
+  ip_address            = google_compute_global_address.default.id
   port_range            = "443"
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
 
 data "aws_route53_zone" "default" {
-  name         = "${local.zone_name}."
+  name         = var.domain
   private_zone = false
 }
 
 resource "aws_route53_health_check" "default" {
-  fqdn             = local.domain
-  ip_address       = var.ipv4_global.address
+  fqdn             = join(".", [var.service_name, var.domain])
+  ip_address       = google_compute_global_address.default.address
   port             = 443
   request_interval = 30
   tags = {
-    "Name" : local.service_name
+    "Name" : var.service_name
   }
   type = "HTTPS"
 }
 
 resource "aws_route53_record" "lb_https_global" {
   zone_id = data.aws_route53_zone.default.zone_id
-  name    = local.domain
+  name    = join(".", [var.service_name, var.domain])
   type    = "A"
   ttl     = 300
   records = [
-    var.ipv4_global.address,
+    google_compute_global_address.default.address,
   ]
   failover_routing_policy {
     type = "PRIMARY"

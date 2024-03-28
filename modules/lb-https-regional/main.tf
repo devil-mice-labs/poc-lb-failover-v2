@@ -6,58 +6,9 @@
 # Regional external HTTP load balancers require a proxy subnet
 # https://cloud.google.com/load-balancing/docs/https#proxy-only-subnet
 #
-# FIXME regional HTTPS load balancer does not support Certificate Manager (?!) https://cloud.google.com/load-balancing/docs/ssl-certificates#certificate-summary
-# FIXME regional HTTPS load balancer does not support Google-managed SSL certificates at all! https://cloud.google.com/load-balancing/docs/ssl-certificates#certificate-summary
-#
 # FIXME backend buckets are not supported by regional external HTTPS load balancers
 # https://cloud.google.com/load-balancing/docs/url-map#configure_url_maps
 #
-# TODO the regional load balancer *could* also provide another endpoint for Let's Encrypt HTTP-01 challenge response, but I won't.
-
-data "google_project" "default" {
-  project_id = var.google_project
-}
-
-# TODO validate that services are enabled
-
-locals {
-  # Resolve the ambiguity of the potential presence of
-  # the trailing dot by removing it, if it is present.
-  domain          = trimsuffix(var.domain, ".")
-  domain_parts    = split(".", local.domain)
-  service_name    = local.domain_parts[0]
-  zone_name_parts = slice(local.domain_parts, 1, length(local.domain_parts))
-  zone_name       = join(".", local.zone_name_parts)
-  root_cert_id    = var.root_cert_id
-}
-
-# The VPC and the proxy subnet for the load balancer.
-resource "google_compute_network" "lb_net" {
-  name                    = "lb-net"
-  auto_create_subnetworks = false
-}
-
-resource "google_compute_subnetwork" "proxy_subnet" {
-  project       = data.google_project.default.project_id
-  region        = var.google_region
-  network       = google_compute_network.lb_net.id
-  name          = "proxy-only-subnet"
-  description   = "This proxy subnet is shared between all of Envoy-based load balancers in its region."
-  ip_cidr_range = "10.0.0.0/24"
-  purpose       = "REGIONAL_MANAGED_PROXY"
-  role          = "ACTIVE"
-}
-
-# Allocate a regional external IP address.
-resource "google_compute_address" "default" {
-  project = data.google_project.default.project_id
-  region  = var.google_region
-
-  address_type = "EXTERNAL"
-  name         = "${local.service_name}-lb-https"
-  network_tier = "STANDARD"
-  # TODO would this work with the PREMIUM network tier address?
-}
 
 # Backend services overview
 # https://cloud.google.com/load-balancing/docs/backend-service
@@ -69,10 +20,10 @@ resource "google_compute_address" "default" {
 # https://cloud.google.com/load-balancing/docs/backend-service
 #
 resource "google_compute_region_backend_service" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
   region  = var.google_region
 
-  name = local.service_name
+  name = "${var.service_name}-r"
   backend {
     balancing_mode  = "UTILIZATION"
     capacity_scaler = 1.0
@@ -81,7 +32,6 @@ resource "google_compute_region_backend_service" "default" {
   enable_cdn            = false
   load_balancing_scheme = "EXTERNAL_MANAGED"
 
-  # TODO log config should probably come from input variables
   log_config {
     enable      = true
     sample_rate = 1.0
@@ -89,13 +39,13 @@ resource "google_compute_region_backend_service" "default" {
 }
 
 resource "google_compute_region_url_map" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
   region  = var.google_region
-  name    = "${local.service_name}-lb-https"
+  name    = "l7-xlb-${var.service_name}-urlmap-r-0"
 
   # Accept only traffic that is addressed to the right domain name
   host_rule {
-    hosts        = [local.domain]
+    hosts        = [join(".", [var.service_name, var.domain])]
     path_matcher = "default"
   }
 
@@ -117,37 +67,62 @@ resource "google_compute_region_url_map" "default" {
   }
 }
 
-# TODO try reusing the existing (global) SSL policy resource
-# FIXME as of Google provider version 4.68.0, the compute_region_ssl_policy resource is in "beta".
-# https://registry.terraform.io/providers/hashicorp/google/4.68.0/docs/resources/compute_region_ssl_policy
 resource "google_compute_region_ssl_policy" "modern" {
-  provider = google-beta
-  project  = data.google_project.default.project_id
+  project  = var.google_project
   region   = var.google_region
 
-  name            = "production-ssl-policy"
-  description     = "Our SSL policy for all production services."
+  name            = "modern-ssl-policy-r"
+  description     = "The SSL policy for Load Balancer Failover Demo."
   profile         = "MODERN"
   min_tls_version = "TLS_1_2"
 }
 
-# FIXME using regional SSL policy (a beta resource) requires using the beta provider for this as well
+# The VPC and the proxy subnet for the load balancer.
+resource "google_compute_network" "lb_net" {
+  name                    = "lb-net"
+  auto_create_subnetworks = false
+}
+
 resource "google_compute_region_target_https_proxy" "default" {
-  provider = google-beta
-  project  = data.google_project.default.project_id
+  project  = var.google_project
   region   = var.google_region
 
-  ssl_certificates = [local.root_cert_id]
-  name             = "${local.service_name}-https-proxy"
-  ssl_policy       = google_compute_region_ssl_policy.modern.self_link
-  url_map          = google_compute_region_url_map.default.id
+  name       = "${var.service_name}-target-proxy-r"
+  ssl_policy = google_compute_region_ssl_policy.modern.self_link
+  url_map    = google_compute_region_url_map.default.id
+
+  certificate_manager_certificates = [
+    var.certificate_manager_certificate,
+  ]
+}
+
+resource "google_compute_subnetwork" "proxy_subnet" {
+  project       = var.google_project
+  region        = var.google_region
+  network       = google_compute_network.lb_net.id
+  name          = "proxy-only-subnet"
+  description   = "This proxy subnet is shared between all of Envoy-based load balancers in its region. It's part of the Load Balancer Failover Demo."
+  ip_cidr_range = "10.0.0.0/24"
+  purpose       = "REGIONAL_MANAGED_PROXY"
+  role          = "ACTIVE"
+}
+
+# Allocate a regional external IP address.
+resource "google_compute_address" "default" {
+  project = var.google_project
+  region  = var.google_region
+
+  address_type = "EXTERNAL"
+  name         = "${var.service_name}-l7-xlb-r"
+  network_tier = "STANDARD"
+  # TODO would this work with the PREMIUM network tier address?
 }
 
 resource "google_compute_forwarding_rule" "default" {
-  project = data.google_project.default.project_id
+  project = var.google_project
   region  = var.google_region
 
-  name                  = "${local.service_name}-lb-https"
+  name                  = "${var.service_name}-l7-xlb-r-0"
   target                = google_compute_region_target_https_proxy.default.self_link
   ip_address            = google_compute_address.default.id
   port_range            = "443"
@@ -159,13 +134,13 @@ resource "google_compute_forwarding_rule" "default" {
 }
 
 data "aws_route53_zone" "default" {
-  name         = "${local.zone_name}."
+  name         = var.domain
   private_zone = false
 }
 
 resource "aws_route53_record" "lb_https_regional" {
   zone_id = data.aws_route53_zone.default.zone_id
-  name    = local.domain
+  name    = join(".", [var.service_name, var.domain])
   type    = "A"
   ttl     = 300
   records = [
